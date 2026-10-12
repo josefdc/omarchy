@@ -10,10 +10,12 @@
 # launch one instead.
 config="${XDG_CONFIG_HOME:-$HOME/.config}"
 
-# Only the browsers themselves: a wrapper in their place may pick a profile or
-# add flags of its own, which only running it can honour.
+# Only the browsers themselves and Omarchy's Chromium GPU wrapper: an unknown
+# wrapper may pick a profile or add flags of its own, which only running it can
+# honour. The trusted wrapper only selects the GPU for a cold start; an already
+# running Chromium process has that selection already.
 case $(type -P "$1") in
-/usr/bin/chromium) profile=chromium flags=chromium-flags.conf ;;
+"$OMARCHY_PATH/bin/omarchy-launch-chromium" | /usr/bin/chromium) profile=chromium flags=chromium-flags.conf ;;
 /usr/bin/google-chrome-stable) profile=google-chrome flags=chrome-flags.conf ;;
 /usr/bin/brave) profile=BraveSoftware/Brave-Browser flags=brave-flags.conf ;;
 /usr/bin/brave-origin) profile=BraveSoftware/Brave-Origin flags=brave-origin-flags.conf ;;

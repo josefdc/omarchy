@@ -5,6 +5,13 @@
 
 default_browser=$(omarchy-cmd-default-browser)
 browser_exec=$(sed -n 's/^Exec=\([^ ]*\).*/\1/p' {~/.local,~/.nix-profile,/usr}/share/applications/$default_browser 2>/dev/null | head -1)
+browser_class=$(basename "$browser_exec" -stable)
+
+# The hybrid-GPU desktop override launches Chromium through Omarchy's wrapper,
+# but its windows still use Chromium's class.
+if [[ $browser_class == "omarchy-launch-chromium" ]]; then
+  browser_class=chromium
+fi
 
 if $browser_exec --help 2>/dev/null | grep -q MOZ_LOG; then
   private_flag="--private-window"
@@ -29,5 +36,5 @@ for argument in "$@"; do
 done
 
 if [[ -n $url && -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
-  omarchy-hyprland-focus-app "^$(basename "$browser_exec" -stable).*$" || true
+  omarchy-hyprland-focus-app "^$browser_class.*$" || true
 fi

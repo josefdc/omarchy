@@ -56,6 +56,15 @@ expected=$(printf 'START\0%s\0browser\0--app=https://example.test/a b' "$test_tm
   fail "the handoff sends the working directory and arguments as Chromium's singleton expects" "$(od -c <"$received")"
 pass "a command line is handed to the running browser over its singleton socket"
 
+(cd "$test_tmp" && OMARCHY_PATH="$ROOT" "$ROOT/bin/omarchy-cmd-browser-handoff" \
+  "$ROOT/bin/omarchy-launch-chromium" "https://example.test/wrapped") ||
+  fail "Omarchy's Chromium GPU wrapper hands a command line to the running browser"
+
+expected=$(printf 'START\0%s\0browser\0https://example.test/wrapped' "$test_tmp" | od -c)
+[[ $(od -c <"$received") == "$expected" ]] ||
+  fail "the trusted Chromium wrapper hands off its arguments unchanged" "$(od -c <"$received")"
+pass "the Chromium GPU wrapper uses the running browser's singleton socket"
+
 ! "$ROOT/bin/omarchy-cmd-browser-handoff" chromium --user-data-dir=/elsewhere https://example.test ||
   fail "another data directory is left to a browser of its own"
 mkdir -p "$test_tmp/wrapper"

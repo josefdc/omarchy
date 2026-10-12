@@ -1,22 +1,22 @@
 # Work around cross-GPU EGL / DMA-BUF incompatibility on hybrid NVIDIA + iGPU laptops.
 #
-# Hyprland composites on the integrated GPU (Intel/AMD) while GLVND loads NVIDIA EGL
-# first (10_nvidia.json priority 10 vs Mesa's 50_mesa.json priority 50). Chromium
-# therefore defaults to NVIDIA EGL and tries to import its DMA-BUF buffers as
-# EGLImages on the iGPU side, failing with EGL_BAD_MATCH and producing black
-# screens, flicker, and GPU process crashes.
+# Usually the integrated GPU drives the display. Muxed Intel Macs are the
+# exception: NVIDIA owns the connectors and boot_vga while AQ_DRM_DEVICES makes
+# Intel the compositor's primary renderer. In both layouts Chromium must render
+# on the same GPU as Hyprland or cross-GPU buffer handling can produce black
+# screens, flicker, Nouveau command errors, and GPU-process crashes.
 #
 # Fix: for Chromium only, route launches through omarchy-launch-chromium, which
-# forces Mesa EGL (same GPU as the compositor) via __EGL_VENDOR_LIBRARY_FILENAMES
-# and picks the matching VAAPI driver. System-wide EGL is left alone so every
-# other app keeps NVIDIA EGL where it needs it.
+# follows AQ_DRM_DEVICES before boot_vga, forces Mesa EGL, selects the matching
+# render node and VA-API driver, and leaves system-wide EGL alone.
 #
 # See: https://github.com/basecamp/omarchy/issues/4901
 
-STOCK_DESKTOP=/usr/share/applications/chromium.desktop
+STOCK_DESKTOP="${OMARCHY_STOCK_CHROMIUM_DESKTOP:-/usr/share/applications/chromium.desktop}"
 USER_DESKTOP="$HOME/.local/share/applications/chromium.desktop"
-MESA_EGL=/usr/share/glvnd/egl_vendor.d/50_mesa.json
+MESA_EGL="${OMARCHY_MESA_EGL:-/usr/share/glvnd/egl_vendor.d/50_mesa.json}"
 WRAPPER="$OMARCHY_PATH/bin/omarchy-launch-chromium"
+drm_path="${OMARCHY_DRM_PATH:-/sys/class/drm}"
 
 # Nothing to override, required bits missing, or user already has an override
 [[ -f $STOCK_DESKTOP ]] || exit 0
@@ -24,10 +24,21 @@ WRAPPER="$OMARCHY_PATH/bin/omarchy-launch-chromium"
 [[ -x $WRAPPER ]] || exit 0
 [[ -f $USER_DESKTOP ]] && exit 0
 
-# Only act when NVIDIA is present but the integrated GPU drives the display. A
-# desktop with an iGPU beside an NVIDIA display card composites on NVIDIA.
+# Only act when NVIDIA is present and the integrated GPU either owns the
+# display or is Aquamarine's explicitly configured primary renderer. A desktop
+# with an iGPU beside an NVIDIA display card and no override stays untouched.
 omarchy-hw-nvidia || exit 0
-omarchy-hw-nvidia-display && exit 0
+if omarchy-hw-nvidia-display; then
+  [[ -n ${AQ_DRM_DEVICES:-} ]] || exit 0
+  aq_primary=${AQ_DRM_DEVICES%%:*}
+  aq_drm_name=$(basename "$(readlink -f "$aq_primary")")
+  aq_vendor_file="$drm_path/$aq_drm_name/device/vendor"
+  [[ -f $aq_vendor_file ]] || exit 0
+  case $(< "$aq_vendor_file") in
+    0x8086 | 0x1002) ;;
+    *) exit 0 ;;
+  esac
+fi
 
 mkdir -p "$(dirname "$USER_DESKTOP")"
 

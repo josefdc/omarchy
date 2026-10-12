@@ -1,35 +1,119 @@
 #!/bin/bash
 
-# omarchy:summary=Launch Chromium on the display GPU's EGL and VA-API drivers on hybrid NVIDIA laptops
+# omarchy:summary=Launch Chromium on Hyprland's EGL and VA-API GPU on hybrid NVIDIA laptops
 # omarchy:hidden=true
 
-# Launch Chromium with Mesa EGL (same GPU as the Hyprland compositor) and a
-# matching VAAPI driver, working around cross-GPU DMA-BUF import failures on
+# Launch Chromium with Mesa EGL on the same GPU as the Hyprland compositor and
+# a matching VA-API driver, working around cross-GPU DMA-BUF import failures on
 # hybrid NVIDIA + iGPU laptops. Used by the user chromium.desktop override
 # installed by install/user/hardware/fix-hybrid-chromium.sh.
 #
-# On non-hybrid hosts the env vars are harmless: Mesa EGL is what Intel/AMD
-# systems would pick anyway, and LIBVA_DRIVER_NAME only applies when libva is
-# loaded. We still gate each var on a quick sanity check so this stays a
-# no-op on systems where it shouldn't matter.
+# AQ_DRM_DEVICES is authoritative when present: its first device is
+# Aquamarine's primary renderer. This matters on muxed Intel Macs where NVIDIA
+# is boot_vga and owns every connector, but Hyprland deliberately renders on
+# Intel and copies completed frames to NVIDIA for scanout. Without the explicit
+# render-node override Chromium follows boot_vga onto Nouveau and can crash in
+# Gallium. Otherwise boot_vga remains the fallback for ordinary hybrid laptops.
 #
 # See: https://github.com/basecamp/omarchy/issues/4901
 
-MESA_EGL=/usr/share/glvnd/egl_vendor.d/50_mesa.json
+MESA_EGL="${OMARCHY_MESA_EGL:-/usr/share/glvnd/egl_vendor.d/50_mesa.json}"
+pci_devices_path="${OMARCHY_PCI_DEVICES_PATH:-/sys/bus/pci/devices}"
+drm_path="${OMARCHY_DRM_PATH:-/sys/class/drm}"
+dri_device_path="${OMARCHY_DRI_DEVICE_PATH:-/dev/dri}"
+dri_driver_path="${OMARCHY_DRI_DRIVER_PATH:-/usr/lib/dri}"
 
-# Steer EGL and VA-API only while an Intel/AMD GPU drives the display, so a
-# laptop later switched to NVIDIA-only keeps NVIDIA EGL. Read sysfs rather than
-# lspci, which wakes a runtime-suspended NVIDIA GPU on every launch.
-for device in /sys/bus/pci/devices/*; do
-  [[ -f $device/boot_vga ]] && (( $(< "$device/boot_vga") == 1 )) || continue
-  case $(< "$device/vendor") in
-    0x8086) export LIBVA_DRIVER_NAME=iHD ;;
-    0x1002) export LIBVA_DRIVER_NAME=radeonsi ;;
-    *) continue ;;
+primary_vendor=""
+primary_pci=""
+primary_render_node=""
+aq_selected_primary=false
+
+select_drm_device() {
+  local device_path="$1"
+  local drm_name pci_path render
+
+  drm_name=$(basename "$(readlink -f "$device_path")")
+  pci_path=$(readlink -f "$drm_path/$drm_name/device")
+  [[ -f $pci_path/vendor ]] || return 1
+
+  case $(< "$pci_path/vendor") in
+    0x8086 | 0x1002) ;;
+    *) return 1 ;;
   esac
+
+  primary_vendor=$(< "$pci_path/vendor")
+  primary_pci=${pci_path##*/}
+
+  shopt -s nullglob
+  for render in "$drm_path"/renderD*; do
+    if [[ $(readlink -f "$render/device") == "$pci_path" ]]; then
+      primary_render_node="$dri_device_path/${render##*/}"
+      break
+    fi
+  done
+}
+
+# Aquamarine renders on the first listed device. Prefer that explicit choice
+# over boot_vga, which describes firmware/display ownership rather than the GPU
+# actually running the compositor on muxed systems.
+if [[ -n ${AQ_DRM_DEVICES:-} ]]; then
+  aq_primary=${AQ_DRM_DEVICES%%:*}
+  if select_drm_device "$aq_primary"; then
+    aq_selected_primary=true
+  fi
+fi
+
+# With no usable Aquamarine override, follow the display GPU as before. Read
+# cached sysfs state rather than lspci, which wakes a suspended NVIDIA GPU.
+if [[ -z $primary_vendor ]]; then
+  shopt -s nullglob
+  for device in "$pci_devices_path"/*; do
+    [[ -f $device/boot_vga ]] && (( $(< "$device/boot_vga") == 1 )) || continue
+    case $(< "$device/vendor") in
+      0x8086 | 0x1002)
+        primary_vendor=$(< "$device/vendor")
+        primary_pci=${device##*/}
+        ;;
+    esac
+  done
+fi
+
+case $primary_vendor in
+  0x8086)
+    if [[ -f $dri_driver_path/iHD_drv_video.so ]]; then
+      export LIBVA_DRIVER_NAME=iHD
+    elif [[ -f $dri_driver_path/i965_drv_video.so ]]; then
+      export LIBVA_DRIVER_NAME=i965
+    else
+      unset LIBVA_DRIVER_NAME
+    fi
+    ;;
+  0x1002)
+    export LIBVA_DRIVER_NAME=radeonsi
+    ;;
+esac
+
+if [[ -n $primary_vendor ]]; then
   if [[ -f $MESA_EGL ]]; then
     export __EGL_VENDOR_LIBRARY_FILENAMES="$MESA_EGL"
   fi
-done
+
+  # Mesa EGL alone does not select between two Mesa GPUs. When Aquamarine has
+  # an explicit iGPU primary, pin Chromium to that GPU as well. Keep a caller's
+  # own render-node override intact.
+  if $aq_selected_primary && [[ -n $primary_render_node ]]; then
+    export DRI_PRIME="pci-${primary_pci//[:.]/_}"
+    has_render_override=false
+    for arg in "$@"; do
+      if [[ $arg == --render-node-override=* ]]; then
+        has_render_override=true
+        break
+      fi
+    done
+    if ! $has_render_override; then
+      set -- "--render-node-override=$primary_render_node" "$@"
+    fi
+  fi
+fi
 
 exec /usr/bin/chromium "$@"
